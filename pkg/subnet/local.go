@@ -235,7 +235,7 @@ func (d *LocalDeployer) doDeploy(chain string, chainGenesis []byte, genesisPath 
 
 	ux.Logger.PrintToUser("Browser Extension connection details (any node URL from above works):")
 	ux.Logger.PrintToUser("RPC URL:          %s", firstURL[strings.LastIndex(firstURL, "http"):])
-	
+
 	// extra ux based on vm type
 	sc, err := d.app.LoadSidecar(chain)
 	if err != nil {
