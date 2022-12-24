@@ -202,6 +202,7 @@ func (d *LocalDeployer) doDeploy(chain string, chainGenesis []byte, genesisPath 
 			Genesis:            genesisPath,
 			SubnetId:           &subnetIDStr,
 			ChainConfig:        chainConfig,
+			BlockchainAlias:    chain,
 			PerNodeChainConfig: perNodeChainConfig,
 		},
 	}
@@ -234,7 +235,6 @@ func (d *LocalDeployer) doDeploy(chain string, chainGenesis []byte, genesisPath 
 
 	ux.Logger.PrintToUser("Browser Extension connection details (any node URL from above works):")
 	ux.Logger.PrintToUser("RPC URL:          %s", firstURL[strings.LastIndex(firstURL, "http"):])
-
 	// extra ux based on vm type
 	sc, err := d.app.LoadSidecar(chain)
 	if err != nil {
@@ -384,7 +384,7 @@ func GetEndpoints(clusterInfo *rpcpb.ClusterInfo) []string {
 	endpoints := []string{}
 	for _, nodeInfo := range clusterInfo.NodeInfos {
 		for blockchainID, chainInfo := range clusterInfo.CustomChains {
-			endpoints = append(endpoints, fmt.Sprintf("Endpoint at node %s for blockchain %q with VM ID %q: %s/ext/bc/%s/rpc", nodeInfo.Name, blockchainID, chainInfo.VmId, nodeInfo.GetUri(), blockchainID))
+			endpoints = append(endpoints, fmt.Sprintf("Endpoint at node %s for blockchain %q with VM ID %q: %s/ext/bc/%s/rpc", nodeInfo.Name, blockchainID, chainInfo.VmId, nodeInfo.GetUri(), chainInfo.ChainName))
 		}
 	}
 	return endpoints
