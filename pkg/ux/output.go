@@ -51,7 +51,7 @@ func PrintWait(cancel chan struct{}) {
 // PrintTableEndpoints prints the endpoints coming from the healthy call
 func PrintTableEndpoints(clusterInfo *rpcpb.ClusterInfo) {
 	table := tablewriter.NewWriter(os.Stdout)
-	header := []string{"node", "VM", "URL", "AliasURL"}
+	header := []string{"node", "VM", "URL", "ALIAS_URL"}
 	table.SetHeader(header)
 	table.SetRowLine(true)
 
