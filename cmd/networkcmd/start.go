@@ -31,7 +31,7 @@ By default, the command loads the default snapshot. If you provide the --snapsho
 flag, the network loads that snapshot instead. The command fails if the local network is
 already running.`,
 
-		RunE:         startNetwork,
+		RunE:         StartNetwork,
 		Args:         cobra.ExactArgs(0),
 		SilenceUsage: true,
 	}
@@ -42,14 +42,14 @@ already running.`,
 	return cmd
 }
 
-func startNetwork(*cobra.Command, []string) error {
+func StartNetwork(*cobra.Command, []string) error {
 	sd := subnet.NewLocalDeployer(app, avagoVersion, "")
 
 	if err := sd.StartServer(); err != nil {
 		return err
 	}
 
-	avalancheGoBinPath, pluginDir, err := sd.SetupLocalEnv()
+	avalancheGoBinPath, err := sd.SetupLocalEnv()
 	if err != nil {
 		return err
 	}
@@ -73,11 +73,13 @@ func startNetwork(*cobra.Command, []string) error {
 		return err
 	}
 
+	pluginDir := app.GetPluginsDir()
+
 	loadSnapshotOpts := []client.OpOption{
-		client.WithPluginDir(pluginDir),
 		client.WithExecPath(avalancheGoBinPath),
 		client.WithRootDataDir(outputDir),
 		client.WithReassignPortsIfUsed(true),
+		client.WithPluginDir(pluginDir),
 	}
 
 	// load global node configs if they exist
@@ -106,9 +108,7 @@ func startNetwork(*cobra.Command, []string) error {
 		ux.Logger.PrintToUser("Booting Network. Wait until healthy...")
 	}
 
-	// TODO: this should probably be extracted from the deployer and
-	// used as an independent helper
-	clusterInfo, err := sd.WaitForHealthy(ctx, cli, constants.HealthCheckInterval)
+	clusterInfo, err := subnet.WaitForHealthy(ctx, cli)
 	if err != nil {
 		return fmt.Errorf("failed waiting for network to become healthy: %w", err)
 	}

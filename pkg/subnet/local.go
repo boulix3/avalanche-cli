@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/ava-labs/avalanche-cli/pkg/application"
 	"github.com/ava-labs/avalanche-cli/pkg/binutils"
@@ -40,29 +39,27 @@ const (
 )
 
 type LocalDeployer struct {
-	procChecker         binutils.ProcessChecker
-	binChecker          binutils.BinaryChecker
-	getClientFunc       getGRPCClientFunc
-	binaryDownloader    binutils.PluginBinaryDownloader
-	healthCheckInterval time.Duration
-	app                 *application.Avalanche
-	backendStartedHere  bool
-	setDefaultSnapshot  setDefaultSnapshotFunc
-	avagoVersion        string
-	vmBin               string
+	procChecker        binutils.ProcessChecker
+	binChecker         binutils.BinaryChecker
+	getClientFunc      getGRPCClientFunc
+	binaryDownloader   binutils.PluginBinaryDownloader
+	app                *application.Avalanche
+	backendStartedHere bool
+	setDefaultSnapshot setDefaultSnapshotFunc
+	avagoVersion       string
+	vmBin              string
 }
 
 func NewLocalDeployer(app *application.Avalanche, avagoVersion string, vmBin string) *LocalDeployer {
 	return &LocalDeployer{
-		procChecker:         binutils.NewProcessChecker(),
-		binChecker:          binutils.NewBinaryChecker(),
-		getClientFunc:       binutils.NewGRPCClient,
-		binaryDownloader:    binutils.NewPluginBinaryDownloader(app),
-		healthCheckInterval: 100 * time.Millisecond,
-		app:                 app,
-		setDefaultSnapshot:  SetDefaultSnapshot,
-		avagoVersion:        avagoVersion,
-		vmBin:               vmBin,
+		procChecker:        binutils.NewProcessChecker(),
+		binChecker:         binutils.NewBinaryChecker(),
+		getClientFunc:      binutils.NewGRPCClient,
+		binaryDownloader:   binutils.NewPluginBinaryDownloader(app),
+		app:                app,
+		setDefaultSnapshot: SetDefaultSnapshot,
+		avagoVersion:       avagoVersion,
+		vmBin:              vmBin,
 	}
 }
 
@@ -113,7 +110,7 @@ func (d *LocalDeployer) BackendStartedHere() bool {
 //   - waits completion of operation
 //   - show status
 func (d *LocalDeployer) doDeploy(chain string, chainGenesis []byte, genesisPath string) (ids.ID, ids.ID, error) {
-	avalancheGoBinPath, pluginDir, err := d.SetupLocalEnv()
+	avalancheGoBinPath, err := d.SetupLocalEnv()
 	if err != nil {
 		return ids.Empty, ids.Empty, err
 	}
@@ -130,7 +127,7 @@ func (d *LocalDeployer) doDeploy(chain string, chainGenesis []byte, genesisPath 
 
 	// check for network and get VM info
 	networkBooted := true
-	clusterInfo, err := d.WaitForHealthy(ctx, cli, d.healthCheckInterval)
+	clusterInfo, err := WaitForHealthy(ctx, cli)
 	if err != nil {
 		if !server.IsServerError(err, server.ErrNotBootstrapped) {
 			return ids.Empty, ids.Empty, fmt.Errorf("failed to query network health: %w", err)
@@ -150,19 +147,19 @@ func (d *LocalDeployer) doDeploy(chain string, chainGenesis []byte, genesisPath 
 		return ids.Empty, ids.Empty, nil
 	}
 
-	if err := d.installPlugin(chainVMID, d.vmBin, pluginDir); err != nil {
+	if err := d.installPlugin(chainVMID, d.vmBin); err != nil {
 		return ids.Empty, ids.Empty, err
 	}
 
 	ux.Logger.PrintToUser("VMs ready.")
 
 	if !networkBooted {
-		if err := d.startNetwork(ctx, cli, avalancheGoBinPath, pluginDir, runDir); err != nil {
+		if err := d.startNetwork(ctx, cli, avalancheGoBinPath, runDir); err != nil {
 			return ids.Empty, ids.Empty, err
 		}
 	}
 
-	clusterInfo, err = d.WaitForHealthy(ctx, cli, d.healthCheckInterval)
+	clusterInfo, err = WaitForHealthy(ctx, cli)
 	if err != nil {
 		return ids.Empty, ids.Empty, fmt.Errorf("failed to query network health: %w", err)
 	}
@@ -219,7 +216,7 @@ func (d *LocalDeployer) doDeploy(chain string, chainGenesis []byte, genesisPath 
 	fmt.Println()
 	ux.Logger.PrintToUser("Blockchain has been deployed. Wait until network acknowledges...")
 
-	clusterInfo, err = d.WaitForHealthy(ctx, cli, d.healthCheckInterval)
+	clusterInfo, err = WaitForHealthy(ctx, cli)
 	if err != nil {
 		return ids.Empty, ids.Empty, fmt.Errorf("failed to query network health: %w", err)
 	}
@@ -307,24 +304,28 @@ func (d *LocalDeployer) printExtraEvmInfo(chain string, chainGenesis []byte) err
 // * sets up default snapshot if not installed
 // * checks if avalanchego is installed in the local binary path
 // * if not, it downloads it and installs it (os - and archive dependent)
-// * returns the location of the avalanchego path and plugin
-func (d *LocalDeployer) SetupLocalEnv() (string, string, error) {
+// * returns the location of the avalanchego path
+func (d *LocalDeployer) SetupLocalEnv() (string, error) {
 	err := d.setDefaultSnapshot(d.app.GetSnapshotsDir(), false)
 	if err != nil {
-		return "", "", fmt.Errorf("failed setting up snapshots: %w", err)
+		return "", fmt.Errorf("failed setting up snapshots: %w", err)
 	}
 
 	avagoDir, err := d.setupLocalEnv()
 	if err != nil {
-		return "", "", fmt.Errorf("failed setting up local environment: %w", err)
+		return "", fmt.Errorf("failed setting up local environment: %w", err)
 	}
 
-	pluginDir := filepath.Join(avagoDir, "plugins")
+	pluginDir := d.app.GetPluginsDir()
 	avalancheGoBinPath := filepath.Join(avagoDir, "avalanchego")
+
+	if err := os.MkdirAll(pluginDir, constants.DefaultPerms755); err != nil {
+		return "", fmt.Errorf("could not create pluginDir %s", pluginDir)
+	}
 
 	exists, err := storage.FolderExists(pluginDir)
 	if !exists || err != nil {
-		return "", "", fmt.Errorf("evaluated pluginDir to be %s but it does not exist", pluginDir)
+		return "", fmt.Errorf("evaluated pluginDir to be %s but it does not exist", pluginDir)
 	}
 
 	// TODO: we need some better version management here
@@ -332,11 +333,11 @@ func (d *LocalDeployer) SetupLocalEnv() (string, string, error) {
 	// * decide if force update or give user choice
 	exists, err = storage.FileExists(avalancheGoBinPath)
 	if !exists || err != nil {
-		return "", "", fmt.Errorf(
+		return "", fmt.Errorf(
 			"evaluated avalancheGoBinPath to be %s but it does not exist", avalancheGoBinPath)
 	}
 
-	return avalancheGoBinPath, pluginDir, nil
+	return avalancheGoBinPath, nil
 }
 
 func (d *LocalDeployer) setupLocalEnv() (string, error) {
@@ -344,40 +345,18 @@ func (d *LocalDeployer) setupLocalEnv() (string, error) {
 }
 
 // WaitForHealthy polls continuously until the network is ready to be used
-func (d *LocalDeployer) WaitForHealthy(
+func WaitForHealthy(
 	ctx context.Context,
 	cli client.Client,
-	healthCheckInterval time.Duration,
 ) (*rpcpb.ClusterInfo, error) {
 	cancel := make(chan struct{})
 	defer close(cancel)
 	go ux.PrintWait(cancel)
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(healthCheckInterval):
-			d.app.Log.Debug("polling for health...")
-			resp, err := cli.Health(ctx)
-			if err != nil {
-				return nil, err
-			}
-			if resp.ClusterInfo == nil {
-				d.app.Log.Debug("warning: ClusterInfo is nil. trying again...")
-				continue
-			}
-			if !resp.ClusterInfo.Healthy {
-				d.app.Log.Debug("network is not healthy. polling again...")
-				continue
-			}
-			if !resp.ClusterInfo.CustomChainsHealthy {
-				d.app.Log.Debug("network is up but custom VMs are not healthy. polling again...")
-				continue
-			}
-			d.app.Log.Debug("network is up and custom VMs are up")
-			return resp.ClusterInfo, nil
-		}
+	resp, err := cli.WaitForHealthy(ctx)
+	if err != nil {
+		return nil, err
 	}
+	return resp.ClusterInfo, nil
 }
 
 // GetEndpoints get a human readable list of endpoints from clusterinfo
@@ -407,9 +386,8 @@ func alreadyDeployed(chainVMID ids.ID, clusterInfo *rpcpb.ClusterInfo) bool {
 func (d *LocalDeployer) installPlugin(
 	vmID ids.ID,
 	vmBin string,
-	pluginDir string,
 ) error {
-	return d.binaryDownloader.InstallVM(vmID.String(), vmBin, pluginDir)
+	return d.binaryDownloader.InstallVM(vmID.String(), vmBin)
 }
 
 func getExpectedDefaultSnapshotSHA256Sum() (string, error) {
@@ -492,15 +470,14 @@ func (d *LocalDeployer) startNetwork(
 	ctx context.Context,
 	cli client.Client,
 	avalancheGoBinPath string,
-	pluginDir string,
 	runDir string,
 ) error {
 	ux.Logger.PrintToUser("Starting network...")
 	loadSnapshotOpts := []client.OpOption{
-		client.WithPluginDir(pluginDir),
 		client.WithExecPath(avalancheGoBinPath),
 		client.WithRootDataDir(runDir),
 		client.WithReassignPortsIfUsed(true),
+		client.WithPluginDir(d.app.GetPluginsDir()),
 	}
 
 	// load global node configs if they exist
@@ -521,4 +498,27 @@ func (d *LocalDeployer) startNetwork(
 		return fmt.Errorf("failed to start network :%w", err)
 	}
 	return nil
+}
+
+// Returns an error if the server cannot be contacted. You may want to ignore this error.
+func GetLocallyDeployedSubnets() (map[string]struct{}, error) {
+	deployedNames := map[string]struct{}{}
+	// if the server can not be contacted, or there is a problem with the query,
+	// DO NOT FAIL, just print No for deployed status
+	cli, err := binutils.NewGRPCClient()
+	if err != nil {
+		return nil, err
+	}
+
+	ctx := binutils.GetAsyncContext()
+	resp, err := cli.Status(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, chain := range resp.GetClusterInfo().CustomChains {
+		deployedNames[chain.ChainName] = struct{}{}
+	}
+
+	return deployedNames, nil
 }

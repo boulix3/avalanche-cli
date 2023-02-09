@@ -72,6 +72,10 @@ func (app *Avalanche) GetCustomVMDir() string {
 	return filepath.Join(app.baseDir, constants.CustomVMDir)
 }
 
+func (app *Avalanche) GetPluginsDir() string {
+	return filepath.Join(app.baseDir, constants.PluginDir)
+}
+
 func (app *Avalanche) GetAvalanchegoBinDir() string {
 	return filepath.Join(app.baseDir, constants.AvalancheCliBinDir, constants.AvalancheGoInstallDir)
 }
@@ -82,6 +86,10 @@ func (app *Avalanche) GetSubnetEVMBinDir() string {
 
 func (app *Avalanche) GetSpacesVMBinDir() string {
 	return filepath.Join(app.baseDir, constants.AvalancheCliBinDir, constants.SpacesVMInstallDir)
+}
+
+func (app *Avalanche) GetUpgradeBytesFilepath(subnetName string) string {
+	return filepath.Join(app.GetSubnetDir(), subnetName, constants.UpgradeBytesFileName)
 }
 
 func (app *Avalanche) GetCustomVMPath(subnetName string) string {
@@ -124,6 +132,10 @@ func (app *Avalanche) GetKeyPath(keyName string) string {
 	return filepath.Join(app.baseDir, constants.KeyDir, keyName+constants.KeySuffix)
 }
 
+func (app *Avalanche) GetUpgradeBytesFilePath(subnetName string) string {
+	return filepath.Join(app.GetSubnetDir(), subnetName, constants.UpgradeBytesFileName)
+}
+
 func (app *Avalanche) GetDownloader() Downloader {
 	return app.Downloader
 }
@@ -132,19 +144,51 @@ func (*Avalanche) GetAvalanchegoCompatibilityURL() string {
 	return constants.AvalancheGoCompatibilityURL
 }
 
+func (app *Avalanche) ReadUpgradeFile(subnetName string) ([]byte, error) {
+	upgradeBytesFilePath := app.GetUpgradeBytesFilePath(subnetName)
+
+	return app.readFile(upgradeBytesFilePath)
+}
+
+func (app *Avalanche) ReadLockUpgradeFile(subnetName string) ([]byte, error) {
+	upgradeBytesLockFilePath := app.GetUpgradeBytesFilePath(subnetName) + constants.UpgradeBytesLockExtension
+
+	return app.readFile(upgradeBytesLockFilePath)
+}
+
+func (app *Avalanche) WriteUpgradeFile(subnetName string, bytes []byte) error {
+	upgradeBytesFilePath := app.GetUpgradeBytesFilePath(subnetName)
+
+	return app.writeFile(upgradeBytesFilePath, bytes)
+}
+
+func (app *Avalanche) WriteLockUpgradeFile(subnetName string, bytes []byte) error {
+	upgradeBytesLockFilePath := app.GetUpgradeBytesFilePath(subnetName) + constants.UpgradeBytesLockExtension
+
+	return app.writeFile(upgradeBytesLockFilePath, bytes)
+}
+
 func (app *Avalanche) WriteGenesisFile(subnetName string, genesisBytes []byte) error {
 	genesisPath := app.GetGenesisPath(subnetName)
-	if err := os.MkdirAll(filepath.Dir(genesisPath), constants.DefaultPerms755); err != nil {
-		return err
-	}
 
-	return os.WriteFile(genesisPath, genesisBytes, WriteReadReadPerms)
+	return app.writeFile(genesisPath, genesisBytes)
 }
 
 func (app *Avalanche) GenesisExists(subnetName string) bool {
 	genesisPath := app.GetGenesisPath(subnetName)
 	_, err := os.Stat(genesisPath)
 	return err == nil
+}
+
+func (app *Avalanche) SidecarExists(subnetName string) bool {
+	sidecarPath := app.GetSidecarPath(subnetName)
+	_, err := os.Stat(sidecarPath)
+	return err == nil
+}
+
+func (app *Avalanche) SubnetConfigExists(subnetName string) bool {
+	// There's always a sidecar, but imported subnets don't have a genesis right now
+	return app.SidecarExists(subnetName)
 }
 
 func (app *Avalanche) KeyExists(keyName string) bool {
@@ -220,7 +264,7 @@ func (app *Avalanche) CreateSidecar(sc *models.Sidecar) error {
 	sc.Version = constants.SidecarVersion
 	scBytes, err := json.MarshalIndent(sc, "", "    ")
 	if err != nil {
-		return nil
+		return err
 	}
 
 	return os.WriteFile(sidecarPath, scBytes, WriteReadReadPerms)
@@ -247,7 +291,7 @@ func (app *Avalanche) UpdateSidecar(sc *models.Sidecar) error {
 	sc.Version = constants.SidecarVersion
 	scBytes, err := json.MarshalIndent(sc, "", "    ")
 	if err != nil {
-		return nil
+		return err
 	}
 
 	sidecarPath := app.GetSidecarPath(sc.Name)
@@ -295,4 +339,20 @@ func (app *Avalanche) GetSidecarNames() ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+func (*Avalanche) readFile(path string) ([]byte, error) {
+	if err := os.MkdirAll(filepath.Dir(path), constants.DefaultPerms755); err != nil {
+		return nil, err
+	}
+
+	return os.ReadFile(path)
+}
+
+func (*Avalanche) writeFile(path string, bytes []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), constants.DefaultPerms755); err != nil {
+		return err
+	}
+
+	return os.WriteFile(path, bytes, WriteReadReadPerms)
 }
