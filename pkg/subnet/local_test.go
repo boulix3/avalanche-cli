@@ -13,6 +13,7 @@ import (
 
 	"github.com/ava-labs/avalanche-cli/internal/mocks"
 	"github.com/ava-labs/avalanche-cli/pkg/application"
+	"github.com/ava-labs/avalanche-cli/pkg/binutils"
 	"github.com/ava-labs/avalanche-cli/pkg/config"
 	"github.com/ava-labs/avalanche-cli/pkg/constants"
 	"github.com/ava-labs/avalanche-cli/pkg/prompts"
@@ -40,6 +41,7 @@ var (
 		ClusterInfo: &rpcpb.ClusterInfo{
 			Healthy:             true, // currently actually not checked, should it, if CustomVMsHealthy already is?
 			CustomChainsHealthy: true,
+			NodeNames:           []string{"testNode1", "testNode2"},
 			NodeInfos: map[string]*rpcpb.NodeInfo{
 				"testNode1": {
 					Name: "testNode1",
@@ -159,7 +161,7 @@ func TestGetLatestAvagoVersion(t *testing.T) {
 	require.Equal(v, testVersion)
 }
 
-func getTestClientFunc() (client.Client, error) {
+func getTestClientFunc(...binutils.GRPCClientOpOption) (client.Client, error) {
 	c := &mocks.Client{}
 	fakeLoadSnapshotResponse := &rpcpb.LoadSnapshotResponse{}
 	fakeSaveSnapshotResponse := &rpcpb.SaveSnapshotResponse{}

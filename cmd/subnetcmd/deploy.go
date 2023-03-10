@@ -103,6 +103,9 @@ func getChainsInSubnet(subnetName string) ([]string, error) {
 	chains := []string{}
 
 	for _, s := range subnets {
+		if !s.IsDir() {
+			continue
+		}
 		sidecarFile := filepath.Join(app.GetSubnetDir(), s.Name(), constants.SidecarFileName)
 		if _, err := os.Stat(sidecarFile); err == nil {
 			// read in sidecar file
@@ -661,7 +664,6 @@ func GetKeychain(
 	if useLedger {
 		ledgerDevice, err := ledger.New()
 		if err != nil {
-			ux.Logger.PrintToUser(logging.LightRed.Wrap("Error accessing ledger device. Please update ledger app to >= v0.6.5."))
 			return kc, err
 		}
 		// ask for addresses here to print user msg for ledger interaction
@@ -678,7 +680,6 @@ func GetKeychain(
 		// get formatted addresses for ux
 		addresses, err := ledgerDevice.Addresses(ledgerIndices)
 		if err != nil {
-			ux.Logger.PrintToUser(logging.LightRed.Wrap("Error accessing ledger device. Please update ledger app to >= v0.6.5."))
 			return kc, err
 		}
 		addrStrs := []string{}

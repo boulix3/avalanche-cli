@@ -63,7 +63,7 @@ func NewLocalDeployer(app *application.Avalanche, avagoVersion string, vmBin str
 	}
 }
 
-type getGRPCClientFunc func() (client.Client, error)
+type getGRPCClientFunc func(...binutils.GRPCClientOpOption) (client.Client, error)
 
 type setDefaultSnapshotFunc func(string, bool) error
 
@@ -125,9 +125,15 @@ func (d *LocalDeployer) doDeploy(chain string, chainGenesis []byte, genesisPath 
 
 	ctx := binutils.GetAsyncContext()
 
-	// check for network and get VM info
+	// loading sidecar before it's needed so we catch any error early
+	sc, err := d.app.LoadSidecar(chain)
+	if err != nil {
+		return ids.Empty, ids.Empty, fmt.Errorf("failed to load sidecar: %w", err)
+	}
+
+	// check for network status
 	networkBooted := true
-	clusterInfo, err := WaitForHealthy(ctx, cli)
+	_, err = WaitForHealthy(ctx, cli)
 	if err != nil {
 		if !server.IsServerError(err, server.ErrNotBootstrapped) {
 			return ids.Empty, ids.Empty, fmt.Errorf("failed to query network health: %w", err)
@@ -142,27 +148,23 @@ func (d *LocalDeployer) doDeploy(chain string, chainGenesis []byte, genesisPath 
 	}
 	d.app.Log.Debug("this VM will get ID", zap.String("vm-id", chainVMID.String()))
 
-	if alreadyDeployed(chainVMID, clusterInfo) {
-		ux.Logger.PrintToUser("Subnet %s has already been deployed", chain)
-		return ids.Empty, ids.Empty, nil
-	}
-
-	if err := d.installPlugin(chainVMID, d.vmBin); err != nil {
-		return ids.Empty, ids.Empty, err
-	}
-
-	ux.Logger.PrintToUser("VMs ready.")
-
 	if !networkBooted {
 		if err := d.startNetwork(ctx, cli, avalancheGoBinPath, runDir); err != nil {
 			return ids.Empty, ids.Empty, err
 		}
 	}
 
-	clusterInfo, err = WaitForHealthy(ctx, cli)
+	// get VM info
+	clusterInfo, err := WaitForHealthy(ctx, cli)
 	if err != nil {
 		return ids.Empty, ids.Empty, fmt.Errorf("failed to query network health: %w", err)
 	}
+
+	if alreadyDeployed(chainVMID, clusterInfo) {
+		ux.Logger.PrintToUser("Subnet %s has already been deployed", chain)
+		return ids.Empty, ids.Empty, nil
+	}
+
 	subnetIDs := clusterInfo.Subnets
 	numBlockchains := len(clusterInfo.CustomChains)
 
@@ -191,6 +193,14 @@ func (d *LocalDeployer) doDeploy(chain string, chainGenesis []byte, genesisPath 
 	if _, err := os.Stat(perNodeChainConfigFile); err == nil {
 		perNodeChainConfig = perNodeChainConfigFile
 	}
+
+	// install the plugin binary for the new VM
+	if err := d.installPlugin(chainVMID, d.vmBin); err != nil {
+		return ids.Empty, ids.Empty, err
+	}
+
+	ux.Logger.PrintToUser("VMs ready.")
+
 	// create a new blockchain on the already started network, associated to
 	// the given VM ID, genesis, and available subnet ID
 	blockchainSpecs := []*rpcpb.BlockchainSpec{
@@ -208,6 +218,10 @@ func (d *LocalDeployer) doDeploy(chain string, chainGenesis []byte, genesisPath 
 		blockchainSpecs,
 	)
 	if err != nil {
+		pluginRemoveErr := d.removeInstalledPlugin(chainVMID)
+		if pluginRemoveErr != nil {
+			ux.Logger.PrintToUser("Failed to remove plugin binary: %s", pluginRemoveErr)
+		}
 		return ids.Empty, ids.Empty, fmt.Errorf("failed to deploy blockchain: %w", err)
 	}
 
@@ -218,26 +232,23 @@ func (d *LocalDeployer) doDeploy(chain string, chainGenesis []byte, genesisPath 
 
 	clusterInfo, err = WaitForHealthy(ctx, cli)
 	if err != nil {
+		pluginRemoveErr := d.removeInstalledPlugin(chainVMID)
+		if pluginRemoveErr != nil {
+			ux.Logger.PrintToUser("Failed to remove plugin binary: %s", pluginRemoveErr)
+		}
 		return ids.Empty, ids.Empty, fmt.Errorf("failed to query network health: %w", err)
 	}
 
-	endpoints := GetEndpoints(clusterInfo)
+	endpoint := GetFirstEndpoint(clusterInfo, chain)
 
 	fmt.Println()
 	ux.Logger.PrintToUser("Network ready to use. Local network node endpoints:")
 	ux.PrintTableEndpoints(clusterInfo)
 	fmt.Println()
 
-	firstURL := endpoints[0]
-
 	ux.Logger.PrintToUser("Browser Extension connection details (any node URL from above works):")
-	ux.Logger.PrintToUser("RPC URL:          %s", firstURL[strings.LastIndex(firstURL, "http"):])
+	ux.Logger.PrintToUser("RPC URL:          %s", endpoint[strings.LastIndex(endpoint, "http"):])
 
-	// extra ux based on vm type
-	sc, err := d.app.LoadSidecar(chain)
-	if err != nil {
-		return ids.Empty, ids.Empty, fmt.Errorf("failed to load sidecar: %w", err)
-	}
 	switch sc.VM {
 	case models.SubnetEvm:
 		if err := d.printExtraEvmInfo(chain, chainGenesis); err != nil {
@@ -359,15 +370,22 @@ func WaitForHealthy(
 	return resp.ClusterInfo, nil
 }
 
-// GetEndpoints get a human readable list of endpoints from clusterinfo
-func GetEndpoints(clusterInfo *rpcpb.ClusterInfo) []string {
-	endpoints := []string{}
+// GetFirstEndpoint get a human readable endpoint for the given chain
+func GetFirstEndpoint(clusterInfo *rpcpb.ClusterInfo, chain string) string {
+	var endpoint string
 	for _, nodeInfo := range clusterInfo.NodeInfos {
 		for blockchainID, chainInfo := range clusterInfo.CustomChains {
-			endpoints = append(endpoints, fmt.Sprintf("Endpoint at node %s for blockchain %q with VM ID %q: %s/ext/bc/%s/rpc", nodeInfo.Name, blockchainID, chainInfo.VmId, nodeInfo.GetUri(), chainInfo.ChainName))
+			if chainInfo.ChainName == chain && nodeInfo.Name == clusterInfo.NodeNames[0] {
+				endpoint = fmt.Sprintf("Endpoint at node %s for blockchain %q with VM ID %q: %s/ext/bc/%s/rpc", nodeInfo.Name, blockchainID, chainInfo.VmId, nodeInfo.GetUri(), chainInfo.ChainName)
+			}
 		}
 	}
-	return endpoints
+	return endpoint
+}
+
+// HasEndpoints returns true if cluster info contains custom blockchains
+func HasEndpoints(clusterInfo *rpcpb.ClusterInfo) bool {
+	return len(clusterInfo.CustomChains) > 0
 }
 
 // return true if vm has already been deployed
@@ -388,6 +406,13 @@ func (d *LocalDeployer) installPlugin(
 	vmBin string,
 ) error {
 	return d.binaryDownloader.InstallVM(vmID.String(), vmBin)
+}
+
+// get list of all needed plugins and install them
+func (d *LocalDeployer) removeInstalledPlugin(
+	vmID ids.ID,
+) error {
+	return d.binaryDownloader.RemoveVM(vmID.String())
 }
 
 func getExpectedDefaultSnapshotSHA256Sum() (string, error) {
@@ -472,7 +497,6 @@ func (d *LocalDeployer) startNetwork(
 	avalancheGoBinPath string,
 	runDir string,
 ) error {
-	ux.Logger.PrintToUser("Starting network...")
 	loadSnapshotOpts := []client.OpOption{
 		client.WithExecPath(avalancheGoBinPath),
 		client.WithRootDataDir(runDir),
@@ -489,7 +513,7 @@ func (d *LocalDeployer) startNetwork(
 		loadSnapshotOpts = append(loadSnapshotOpts, client.WithGlobalNodeConfig(configStr))
 	}
 
-	_, err = cli.LoadSnapshot(
+	pp, err := cli.LoadSnapshot(
 		ctx,
 		constants.DefaultSnapshotName,
 		loadSnapshotOpts...,
@@ -497,6 +521,8 @@ func (d *LocalDeployer) startNetwork(
 	if err != nil {
 		return fmt.Errorf("failed to start network :%w", err)
 	}
+	ux.Logger.PrintToUser("Node log path: %s/node<i>/logs", pp.ClusterInfo.RootDataDir)
+	ux.Logger.PrintToUser("Starting network...")
 	return nil
 }
 

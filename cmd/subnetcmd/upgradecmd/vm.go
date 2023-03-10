@@ -13,6 +13,8 @@ import (
 	"github.com/ava-labs/avalanche-cli/pkg/subnet"
 	"github.com/ava-labs/avalanche-cli/pkg/ux"
 	"github.com/ava-labs/avalanche-cli/pkg/vm"
+	"github.com/ava-labs/avalanche-network-runner/server"
+	"github.com/ava-labs/avalanche-network-runner/utils"
 	"github.com/spf13/cobra"
 )
 
@@ -107,13 +109,24 @@ func upgradeVM(_ *cobra.Command, args []string) error {
 		return err
 	}
 
+	// if upgrading local, check that the network is off otherwise fail here
+	serverRunning, err := isServerRunning()
+	if err != nil {
+		return err
+	}
+
+	if serverRunning {
+		ux.Logger.PrintToUser("Please stop network before upgrading local VMs")
+		return errors.New("network is still running")
+	}
+
 	vmType := sc.VM
 	if vmType == models.SubnetEvm || vmType == models.SpacesVM {
-		return selectUpdateOption(subnetName, vmType, sc, networkToUpgrade)
+		return selectUpdateOption(vmType, sc, networkToUpgrade)
 	}
 
 	// Must be a custom update
-	return updateToCustomBin(subnetName, sc, networkToUpgrade, binaryPathArg)
+	return updateToCustomBin(sc, networkToUpgrade, binaryPathArg)
 }
 
 // select which network to upgrade
@@ -135,14 +148,16 @@ func selectNetworkToUpgrade(sc models.Sidecar, upgradeOptions []string) (string,
 		upgradeOptions = []string{}
 	}
 
-	// check if subnet already deployed locally
-	locallyDeployedSubnets, err := subnet.GetLocallyDeployedSubnets()
+	// get locally deployed subnets from file since network is shut down
+	locallyDeployedSubnets, err := subnet.GetLocallyDeployedSubnetsFromFile(app)
 	if err != nil {
-		// ignore error if we can't reach the server, assume subnet isn't deployed
-		app.Log.Warn("Unable to reach server to get deployed subnets")
+		return "", fmt.Errorf("unable to read deployed subnets: %w", err)
 	}
-	if _, ok := locallyDeployedSubnets[sc.Subnet]; ok {
-		upgradeOptions = append(upgradeOptions, localDeployment)
+
+	for _, subnet := range locallyDeployedSubnets {
+		if subnet == sc.Name {
+			upgradeOptions = append(upgradeOptions, localDeployment)
+		}
 	}
 
 	// check if subnet deployed on fuji
@@ -166,14 +181,14 @@ func selectNetworkToUpgrade(sc models.Sidecar, upgradeOptions []string) (string,
 	return selectedDeployment, nil
 }
 
-func selectUpdateOption(subnetName string, vmType models.VMType, sc models.Sidecar, networkToUpgrade string) error {
+func selectUpdateOption(vmType models.VMType, sc models.Sidecar, networkToUpgrade string) error {
 	switch {
 	case useLatest:
 		return updateToLatestVersion(vmType, sc, networkToUpgrade)
 	case targetVersion != "":
 		return updateToSpecificVersion(sc, networkToUpgrade)
 	case binaryPathArg != "":
-		return updateToCustomBin(subnetName, sc, networkToUpgrade, binaryPathArg)
+		return updateToCustomBin(sc, networkToUpgrade, binaryPathArg)
 	}
 
 	latestVersionUpdate := "Update to latest version"
@@ -194,7 +209,7 @@ func selectUpdateOption(subnetName string, vmType models.VMType, sc models.Sidec
 	case specificVersionUpdate:
 		return updateToSpecificVersion(sc, networkToUpgrade)
 	case customBinaryUpdate:
-		return updateToCustomBin(subnetName, sc, networkToUpgrade, binaryPathArg)
+		return updateToCustomBin(sc, networkToUpgrade, binaryPathArg)
 	default:
 		return errors.New("invalid option")
 	}
@@ -259,8 +274,16 @@ func updateVMByNetwork(sc models.Sidecar, targetVersion string, networkToUpgrade
 	}
 }
 
-func updateToCustomBin(subnetName string, sc models.Sidecar, networkToUpgrade, binaryPath string) error {
-	if err := vm.CopyCustomVM(app, subnetName, binaryPath); err != nil {
+func updateToCustomBin(sc models.Sidecar, networkToUpgrade, binaryPath string) error {
+	var err error
+	if binaryPath == "" {
+		binaryPath, err = app.Prompt.CaptureExistingFilepath("Enter path to custom binary")
+		if err != nil {
+			return err
+		}
+	}
+
+	if err := vm.CopyCustomVM(app, sc.Name, binaryPath); err != nil {
 		return err
 	}
 
@@ -280,8 +303,56 @@ func updateFutureVM(sc models.Sidecar, targetVersion string) error {
 	return nil
 }
 
-func updateExistingLocalVM(_ models.Sidecar, _ string) error {
-	ux.Logger.PrintToUser("Coming soon. For now, please upgrade your existing deployments and redeploy the subnet.")
+func updateExistingLocalVM(sc models.Sidecar, targetVersion string) error {
+	vmid, err := utils.VMID(sc.Name)
+	if err != nil {
+		return err
+	}
+	var vmBin string
+	var rpcVersion int
+	switch sc.VM {
+	// download the binary and prepare to copy it
+	case models.SubnetEvm:
+		vmBin, err = binutils.SetupSubnetEVM(app, targetVersion)
+		if err != nil {
+			return fmt.Errorf("failed to install subnet-evm: %w", err)
+		}
+
+		rpcVersion, err = vm.GetRPCProtocolVersion(app, models.SubnetEvm, targetVersion)
+		if err != nil {
+			return fmt.Errorf("unable to get RPC version: %w", err)
+		}
+	case models.SpacesVM:
+		// download the binary and prepare to copy it
+		vmBin, err = binutils.SetupSpacesVM(app, targetVersion)
+		if err != nil {
+			return fmt.Errorf("failed to install spaces-vm: %w", err)
+		}
+
+		rpcVersion, err = vm.GetRPCProtocolVersion(app, models.SpacesVM, targetVersion)
+		if err != nil {
+			return fmt.Errorf("unable to get RPC version: %w", err)
+		}
+	case models.CustomVM:
+		// get the path to the already copied binary
+		vmBin = binutils.SetupCustomBin(app, sc.Name)
+		rpcVersion = 0
+	default:
+		return errors.New("unknown VM type " + string(sc.VM))
+	}
+
+	// Update the binary in the plugin directory
+	if err := binutils.UpgradeVM(app, vmid.String(), vmBin); err != nil {
+		return err
+	}
+
+	// Update the sidecar with new RPC version
+	if err = binutils.UpdateLocalSidecarRPC(app, sc, rpcVersion); err != nil {
+		return fmt.Errorf("unable to set RPC version: %w", err)
+	}
+
+	ux.Logger.PrintToUser("Upgrade complete. Ready to restart the network.")
+
 	return nil
 }
 
@@ -314,4 +385,21 @@ func chooseManualOrAutomatic(sc models.Sidecar, targetVersion string, _ string) 
 func updateMainnetVM() error {
 	ux.Logger.PrintToUser("Coming soon. For now, please upgrade your mainnet deployments manually.")
 	return nil
+}
+
+func isServerRunning() (bool, error) {
+	cli, err := binutils.NewGRPCClient()
+	if err == binutils.ErrGRPCTimeout {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	ctx := binutils.GetAsyncContext()
+
+	_, err = cli.Status(ctx)
+
+	if err == nil || !server.IsServerError(err, server.ErrNotBootstrapped) {
+		return true, nil
+	}
+	return false, nil
 }
